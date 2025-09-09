@@ -15,3 +15,5 @@ The next step is to translate from the connectome format into the Jaxley network
 
 ### Part 3: Simulation and Optimization
 Lastly, we simulate, visualize, and perform a simple gradient based optimization on network parameters and stimulus input. Gradients can be accessed with any neurally encoded loss function that is itself differentiable.
+
+![Connectome Visualization](Connectome-vis-Full.png)
