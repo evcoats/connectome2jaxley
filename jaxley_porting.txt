@@ -1,0 +1,261 @@
+Awesome—this is the perfect use-case for leaning on Jaxley’s “batteries-included” pieces and only writing the few custom mechanisms you truly need.
+
+Below is a pragmatic, tiered plan that maps c302 (C1: single-compartment, graded synapses) into Jaxley with the smallest amount of new code, while keeping the important biophysics.
+
+What to reuse vs simplify vs custom-build
+Reuse Jaxley primitives (no new code)
+
+Geometry/compartments: Compartment → Branch → Cell exactly as in the tutorial.
+
+Passive leak: use Jaxley’s preconfigured Leak() and just set its parameters (see “wiring” at the end).
+
+A delayed-rectifier K⁺: use Jaxley’s preconfigured K() as your effective outward rectifier.
+
+This will stand in for c302’s K_slow (and, in the minimal tier, we’ll let it subsume K_fast’s “role”).
+
+Network / wiring: Network, connect, record, integrate.
+
+Simplify (drop or merge)
+
+Merge K_fast + K_slow → one effective K: In C1, both K currents are outward rectifiers with different time scales. For the minimal translation, keep only an effective K (Jaxley’s K) and fit its conductance to get qualitatively similar repolarization/plateau behavior.
+
+Synapse filter: c302’s graded synapse has a 1st-order low-pass (k ≈ 0.025 ms⁻¹). You can start with instantaneous sigmoid (no state) and only add the s(t) low-pass if you see oscillations that are too sharp.
+
+Ca-dependent inactivation (h): for a representative subset, start with the voltage-gated Ca channel only (activation e, voltage inactivation f). Add Ca-pool + Ca-dependent h later (balanced/full tiers).
+
+Custom-build (small, focused)
+
+Voltage-gated Ca²⁺ channel (Boyle-style): Jaxley doesn’t ship a “C. elegans Ca” by default; we’ll write one tiny class.
+
+Graded chemical synapse: 10 lines of code with Jaxley’s Synapse base class (logistic of pre-V; optional low-pass).
+
+Gap junction (electrical synapse): one small Synapse that uses (V_post − V_pre) and is connected both ways.
+
+This keeps the core “C” biophysics, but avoids porting every knob on day one.
+
+Three quick tiers (pick your starting point)
+
+M0 (Minimal, Jaxley-native)
+Leak() + K() (no K_fast), custom Ca (e+f only), instant graded synapse, optional gap junctions.
+✅ Fastest path; good qualitative match.
+
+M1 (Balanced, closer to c302)
+Leak() + K() + custom K_fast (activation + slow inactivation), custom Ca (e+f + Ca-pool + h), low-pass graded synapse, gap junctions.
+✅ Keeps the activity-dependent Ca negative feedback and two K time-scales.
+
+M2 (Full-fidelity C1)
+Separate K_fast and K_slow, full Ca (e,f,h) with Ca pool, graded synapse with low-pass, gap junctions, parameterized per c302.
+✅ 1:1 dynamics; more code, still manageable in Jaxley.
+
+Below I give drop-in classes for M0/M1 that you can slot into your evcoats/jaxleyconnectomes scaffolding.
+
+Custom pieces (concise, Jaxley-idiomatic)
+1) Voltage-gated Ca²⁺ channel (minimal e+f; add Ca later)
+import jax.numpy as jnp
+from jaxley.channels import Channel
+from jaxley.solver_gate import solve_gate_exponential  # expo-Euler helper
+
+class CaBoyle(Channel):
+    """
+    Minimal Boyle-style Ca channel: activation e, voltage inactivation f.
+    (Add Ca pool + Ca-dependent h below if desired.)
+    """
+    def __init__(self, name=None, params=None):
+        self.current_is_in_mA_per_cm2 = True
+        super().__init__(name)
+        # Default params ~c302-scale; replace with your exact values
+        self.channel_params = {
+            "gCa": 1.80,      # mS/cm^2 (adjust from c302)
+            "E_Ca": 10.0,     # mV
+            "e_mid": -3.4, "e_slope": 6.75,  "tau_e": 0.10,   # ms
+            "f_mid": 25.0, "f_slope": -5.0, "tau_f": 150.0    # ms
+        }
+        if params: self.channel_params.update(params)
+        self.channel_states = {"e": 0.0, "f": 1.0}
+        self.current_name = "i_Ca"
+
+    def _sig(self, v, mid, slope):  # generic logistic
+        return 1.0 / (1.0 + jnp.exp((mid - v) / slope))
+
+    def update_states(self, states, dt, v, params):
+        e, f = states["e"], states["f"]
+        e_inf = self._sig(v, params["e_mid"], params["e_slope"])
+        f_inf = self._sig(v, params["f_mid"], params["f_slope"])
+        new_e = solve_gate_exponential(e, dt, alpha=None, beta=None, inf=e_inf, tau=params["tau_e"])
+        new_f = solve_gate_exponential(f, dt, alpha=None, beta=None, inf=f_inf, tau=params["tau_f"])
+        return {"e": new_e, "f": new_f}
+
+    def compute_current(self, states, v, params):
+        e, f = states["e"], states["f"]
+        g = params["gCa"] * (e**2) * f  # e^2 like c302
+        return g * (v - params["E_Ca"])
+
+Add Ca-pool + Ca-dependent inactivation h (M1/M2)
+class CaBoyleWithPool(CaBoyle):
+    """
+    Adds internal Ca pool and instantaneous Ca-dependent inactivation h(Ca).
+    """
+    def __init__(self, name=None, params=None):
+        super().__init__(name, params)
+        # Ca pool + h gate parameters (tune to c302)
+        extra = {
+            "tau_Ca": 13.8,       # ms decay
+            "rho": 2.4e-4,        # concentration coupling
+            "h_alpha": 0.28,      # scales Ca-dep inactivation
+            "h_cahalf": 6.4e-8,   # M
+            "h_k": -1.0e-8        # M (slope; negative produces right-shaped curve)
+        }
+        self.channel_params.update(extra)
+        self.channel_states.update({"Ca_in": 0.0})
+
+    def _h_from_Ca(self, Ca, p):
+        h_inf = 1.0 / (1.0 + jnp.exp((p["h_cahalf"] - Ca) / p["h_k"]))
+        return 1.0 + (h_inf - 1.0) * p["h_alpha"]
+
+    def update_states(self, states, dt, v, params):
+        upd = super().update_states(states, dt, v, params)
+        # use *previous* current to update Ca pool (semi-implicit is fine for small dt)
+        e, f = upd["e"], upd["f"]
+        I_Ca = params["gCa"] * (e**2) * f * (v - params["E_Ca"])   # mA/cm^2
+        Ca = states["Ca_in"] - params["rho"] * I_Ca * dt - (states["Ca_in"] / params["tau_Ca"]) * dt
+        upd["Ca_in"] = Ca
+        return upd
+
+    def compute_current(self, states, v, params):
+        e, f, Ca = states["e"], states["f"], states["Ca_in"]
+        h = self._h_from_Ca(Ca, params)
+        g = params["gCa"] * (e**2) * f * h
+        return g * (v - params["E_Ca"])
+
+2) Graded chemical synapse (excitatory or inhibitory)
+import jax.numpy as jnp
+from jaxley.synapses.synapse import Synapse
+
+class GradedSynapse(Synapse):
+    """
+    Logistic of V_pre; optional 1st-order low-pass s(t) with rate k.
+    Set e_rev = 0 (exc) or -70 (inh), g_max in mS/cm^2 or nS normalized to area.
+    """
+    def __init__(self, name=None, *, g_max=0.00009, e_rev=0.0, Vth=0.0, delta=5.0, k=0.0):
+        super().__init__(name)
+        self.synapse_params = {"g": g_max, "E": e_rev, "Vth": Vth, "delta": delta, "k": k}
+        self.synapse_states = ({"s": 0.0} if k > 0.0 else {})  # include state only if low-pass enabled
+
+    def _S(self, v, p):  # logistic release
+        return 1.0 / (1.0 + jnp.exp((p["Vth"] - v) / p["delta"]))
+
+    def update_states(self, states, dt, pre_v, post_v, p):
+        if "s" not in states:    # instantaneous mode
+            return states
+        s_inf = self._S(pre_v, p)
+        new_s = states["s"] + p["k"] * (s_inf - states["s"]) * dt
+        return {"s": new_s}
+
+    def compute_current(self, states, pre_v, post_v, p):
+        s_eff = states["s"] if "s" in states else self._S(pre_v, p)
+        g_syn = p["g"] * s_eff
+        # Jaxley convention in tutorial: I = g * (V_post - E_rev)
+        return g_syn * (post_v - p["E"])
+
+
+Excitatory: GradedSynapse(g_max=9e-5, e_rev=0.0, Vth=0.0, delta=5.0, k=0.025)
+
+Inhibitory: same but e_rev=-70.0.
+
+Start without k (instantaneous); add k=0.025 (≈40 ms τ) if you need the smoothing to match c302 more closely.
+
+3) Gap junction (electrical) synapse
+class GapJunction(Synapse):
+    """
+    Electrical coupling: I_post = g_gap * (V_post - V_pre)
+    Connect *both directions* for symmetry.
+    """
+    def __init__(self, name=None, *, g_gap=5.2e-7):  # mS/cm^2 (adjust)
+        super().__init__(name)
+        self.synapse_params = {"g": g_gap}
+        self.synapse_states = {}
+
+    def update_states(self, states, dt, pre_v, post_v, p):
+        return states
+
+    def compute_current(self, states, pre_v, post_v, p):
+        return p["g"] * (post_v - pre_v)
+
+Wiring it up (M0 → M1)
+from jax import config; config.update("jax_enable_x64", True)
+import jaxley as jx
+
+# --- Cell ---
+comp  = jx.Compartment()
+br    = jx.Branch(comp, ncomp=1)           # single compartment like c302 C1
+cell  = jx.Cell(br, parents=[-1])          # single soma
+
+# Insert channels
+cell.insert(jx.channels.Leak())            # reuse
+cell.insert(jx.channels.K())               # reuse (effective outward K)
+cell.insert(CaBoyle())                     # minimal Ca (or CaBoyleWithPool for M1/M2)
+
+# Tune defaults to c302-ish values (examples; set exactly from c302 tables):
+# Leak
+cell.modules["Leak"].channel_params.update({"gL": 0.002, "EL": -60.0})  # names may differ; adjust per your version
+# K (effective)
+cell.modules["K"].channel_params.update({"gK": 0.45, "EK": -60.0})      # pick to match K_slow scale
+# Ca
+cell.modules["CaBoyle"].channel_params.update({"gCa": 1.8, "E_Ca": 10.0})
+
+# Stimulus & recording
+cell.delete_stimuli()
+cell.branch(0).comp(0).stimulate(jx.step_current(amp=0.5, dur=500.0, dt=0.025, delay=50.0))
+cell.delete_recordings()
+cell.branch(0).comp(0).record()
+
+# --- Network ---
+N = 10
+net = jx.Network([cell for _ in range(N)])
+
+# Example: connect 0 -> 1 excitatory, 1 -> 2 inhibitory, 2 <-> 3 gap
+from jaxley.connect import connect
+connect(net.cell(0).branch(0).loc(0.0), net.cell(1).branch(0).loc(0.0),
+        GradedSynapse(g_max=9e-5, e_rev=0.0, Vth=0.0, delta=5.0))  # instant first
+connect(net.cell(1).branch(0).loc(0.0), net.cell(2).branch(0).loc(0.0),
+        GradedSynapse(g_max=9e-5, e_rev=-70.0, Vth=0.0, delta=5.0))
+# Gap: add both directions
+gj = GapJunction(g_gap=5.2e-7)
+connect(net.cell(2).branch(0).loc(0.0), net.cell(3).branch(0).loc(0.0), gj)
+connect(net.cell(3).branch(0).loc(0.0), net.cell(2).branch(0).loc(0.0), gj)
+
+# Record some cells
+for i in range(4):
+    net.cell(i).branch(0).loc(0.0).record()
+
+# Integrate
+s = jx.integrate(net)   # uses Jaxley’s solver and returns traces
+
+
+Parameter names: Jaxley’s built-ins (Leak, K) may use parameter keys like gL/EL or gK/EK. Access them via cell.modules[...] (or the object handles Jaxley returns) and update appropriately. For a perfect match to c302, plug in your exported numbers.
+
+Why this mapping works
+
+Faithful where it matters: You keep a conductance-based single compartment with a Ca-driven depolarizing current (C. elegans hallmark) and an outward K rectifier—plus graded synapses and electrical coupling. That’s the essence of C1.
+
+Minimal custom surface area: Only ~60 lines for Ca + graded synapse + gap junctions. Everything else is reused.
+
+Easy to upgrade:
+
+Want closer c302 behavior? Swap CaBoyle → CaBoyleWithPool (turns on activity-dependent inactivation) and add k=0.025 to GradedSynapse.
+
+Want K_fast back? Add a small KFast(Channel) with p^4 q and a faster τ; insert alongside K() and retune conductances.
+
+Practical checklist (do this once)
+
+Start with M0 and fit three knobs: gK (effective), gCa, and gL to reproduce a few single-cell traces you trust from c302 (resting V, depolarization amplitude, decay shape).
+
+If synapses feel too “snappy,” enable k=0.025 in GradedSynapse.
+
+If Ca plateaus are too long, switch to CaBoyleWithPool and adjust tau_Ca/rho modestly (they set the negative feedback timescale).
+
+Add gap junctions both directions for each electrical edge.
+
+Scale synaptic g_max by contact count if you import the full connectome.
+
+This gives you a clean, idiomatic Jaxley model that’s compatible with your evcoats/jaxleyconnectomes code, remains differentiable, and is easy to maintain—and you only “go custom” where Jaxley doesn’t already have the part.
