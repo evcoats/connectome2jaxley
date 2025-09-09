@@ -1121,12 +1121,17 @@ class BuiltJaxley:
     edge_id_to_index: Dict[str, int]
 
 
-def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> BuiltJaxley:
+def build_jaxley_from_params(
+    spec: NetworkSpec,
+    bundle: JaxleyParamBundle,
+    *,
+    fast: bool = False,
+) -> BuiltJaxley:
     # Cells
     id_to_index: Dict[str, int] = {}
     cells: List[jx.Cell] = []
     for idx, cid in enumerate(spec.cells.keys()):
-        if (idx % 100) == 0:
+        if ((idx % 100) == 0):
             print("Building cell "+str(idx) + " of "+str(len(spec.cells.keys())) + " "+str(cid))
         cp = bundle.cell_params.get(cid, JaxleyCellParams())
         comp = jx.Compartment()
@@ -1137,7 +1142,7 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
         else:
             raise NotImplementedError(f"Unsupported mech '{cp.mech}' for cell {cid}")
         # Optionally insert VGCaChannel if available (per model_simplification)
-        if VGCaChannel is not None:
+        if (VGCaChannel is not None) and (not fast):
             try:
                 cell.insert(VGCaChannel())
             except Exception:
@@ -1145,6 +1150,7 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
         id_to_index[cid] = idx
         cells.append(cell)
 
+        # Always attach basic xyzr locations (fast mode keeps geometry lightweight)
         xyzr_struct = spec.cells[cid].params.get("xyzr")
         if xyzr_struct is not None:
             arr = [np.asarray(branch, dtype=float) for branch in xyzr_struct]
@@ -1160,7 +1166,7 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
 
     net = jx.Network(cells)
 
-    # 1) Install xyzr on the network’s cells (BEFORE connecting)
+    # 1) Install xyzr on the network’s cells (BEFORE connecting) for plotting/locations
     for i, cid in enumerate(spec.cells.keys()):
         xyzr_struct = spec.cells[cid].params.get("xyzr")
         if xyzr_struct is None:
@@ -1170,14 +1176,15 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
         net.cell(np.array([i])).xyzr = arr
 
     # 2) Refresh plotting/centers (safe no-op if not needed)
-    try:
-        # per-cell center cache
-        for i, _ in enumerate(spec.cells.keys()):
-            c = net.cell(np.array([i]))
-            if hasattr(c, "compute_compartment_centers"):
-                c.compute_compartment_centers()
-    except Exception:
-        pass
+    if not fast:
+        try:
+            # per-cell center cache
+            for i, _ in enumerate(spec.cells.keys()):
+                c = net.cell(np.array([i]))
+                if hasattr(c, "compute_compartment_centers"):
+                    c.compute_compartment_centers()
+        except Exception:
+            pass
 
     def _loc_on_branch0(net, idx, frac):
         f = float(frac) if frac is not None else 0.0
@@ -1195,7 +1202,7 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
     print("Edges:", len(spec.conns))
     i = 0
     for edge in spec.conns:
-        if (i % 100) == 0:
+        if((i % 200) == 0):
             print("Building edge "+str(i) + " of "+str(len(spec.conns)) + " "+str(edge.id))
         i += 1
         pre_idx  = id_to_index.get(edge.pre_id)
@@ -1217,13 +1224,16 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
 
         try:
             if jp.kind == "chem" and jp.syn_class == "IonotropicSynapse":
-                # Prefer differentiable ExpTwo-like synapse if available
-                if DifferentiableExpTwoSynapse is not None:
-                    syn = DifferentiableExpTwoSynapse()
-                elif GradedChemicalSynapse is not None:
-                    syn = GradedChemicalSynapse()
-                else:
+                if fast:
                     syn = IonotropicSynapse()
+                else:
+                    # Prefer differentiable ExpTwo-like synapse if available
+                    if DifferentiableExpTwoSynapse is not None:
+                        syn = DifferentiableExpTwoSynapse()
+                    elif GradedChemicalSynapse is not None:
+                        syn = GradedChemicalSynapse()
+                    else:
+                        syn = IonotropicSynapse()
                 jx.connect(pre_loc, post_loc, syn)
             elif jp.kind == "gap" and jp.syn_class == "GapJunction" and GapJunction is not None:
                 syn = GapJunction()
@@ -1248,78 +1258,89 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
 
         # Set parameters, tolerating schema variants and multiple synapse implementations
         if jp.kind == "chem":
-            # Try setting on any available synapse view in order of most specific → generic
-            syn_views = ("DifferentiableExpTwoSynapse", "GradedChemicalSynapse", "IonotropicSynapse")
+            if fast:
+                # Fast path: set only basic IonotropicSynapse params if view exists
+                try:
+                    net.IonotropicSynapse.edge(eid).set("IonotropicSynapse_gS", float(jp.syn_kwargs["gS"]))
+                except Exception:
+                    pass
+                try:
+                    net.IonotropicSynapse.edge(eid).set("IonotropicSynapse_e_syn", float(jp.syn_kwargs["E_syn_mV"]))
+                except Exception:
+                    pass
+            else:
+                # Try setting on any available synapse view in order of most specific → generic
+                syn_views = ("DifferentiableExpTwoSynapse", "GradedChemicalSynapse", "IonotropicSynapse")
 
-            def _try_set_on_any(view_names, key_candidates, value) -> bool:
-                for vname in view_names:
-                    if not hasattr(net, vname):
-                        continue
-                    edge_view = getattr(net, vname)
-                    for key in key_candidates:
-                        try:
-                            edge_view.edge(eid).set(key, float(value))
-                            return True
-                        except Exception:
+                def _try_set_on_any(view_names, key_candidates, value) -> bool:
+                    for vname in view_names:
+                        if not hasattr(net, vname):
                             continue
-                return False
+                        edge_view = getattr(net, vname)
+                        for key in key_candidates:
+                            try:
+                                edge_view.edge(eid).set(key, float(value))
+                                return True
+                            except Exception:
+                                continue
+                    return False
 
-            # gS
-            _try_set_on_any(
-                syn_views,
-                ("DifferentiableExpTwoSynapse_gS", "GradedChemicalSynapse_gS", "IonotropicSynapse_gS", "gS"),
-                jp.syn_kwargs["gS"],
-            )
-            # e_syn / reversal (in mV)
-            _try_set_on_any(
-                syn_views,
-                ("DifferentiableExpTwoSynapse_e_syn", "GradedChemicalSynapse_e_syn", "IonotropicSynapse_e_syn", "e_syn"),
-                jp.syn_kwargs["E_syn_mV"],
-            )
-            # Optional kinetics if provided (ms)
-            if "tau_rise_ms" in jp.syn_kwargs:
+                # gS
                 _try_set_on_any(
                     syn_views,
-                    (
-                        "DifferentiableExpTwoSynapse_tau_rise_ms",
-                        "GradedChemicalSynapse_tau_rise_ms",
-                        "IonotropicSynapse_tau_rise_ms",
-                        "tau_rise_ms",
-                        "tauRise_ms",
-                    ),
-                    jp.syn_kwargs["tau_rise_ms"],
+                    ("DifferentiableExpTwoSynapse_gS", "GradedChemicalSynapse_gS", "IonotropicSynapse_gS", "gS"),
+                    jp.syn_kwargs["gS"],
                 )
-            if "tau_decay_ms" in jp.syn_kwargs:
+                # e_syn / reversal (in mV)
                 _try_set_on_any(
                     syn_views,
-                    (
-                        "DifferentiableExpTwoSynapse_tau_decay_ms",
-                        "GradedChemicalSynapse_tau_decay_ms",
-                        "IonotropicSynapse_tau_decay_ms",
-                        "tau_decay_ms",
-                        "tauDecay_ms",
-                    ),
-                    jp.syn_kwargs["tau_decay_ms"],
+                    ("DifferentiableExpTwoSynapse_e_syn", "GradedChemicalSynapse_e_syn", "IonotropicSynapse_e_syn", "e_syn"),
+                    jp.syn_kwargs["E_syn_mV"],
                 )
-            # Graded params if present
-            if "v_th" in jp.syn_kwargs:
-                _try_set_on_any(
-                    syn_views,
-                    ("DifferentiableExpTwoSynapse_v_th", "GradedChemicalSynapse_v_th", "IonotropicSynapse_v_th", "v_th"),
-                    jp.syn_kwargs["v_th"],
-                )
-            if "delta" in jp.syn_kwargs:
-                _try_set_on_any(
-                    syn_views,
-                    ("DifferentiableExpTwoSynapse_delta", "GradedChemicalSynapse_delta", "IonotropicSynapse_delta", "delta"),
-                    jp.syn_kwargs["delta"],
-                )
-            if "k_minus" in jp.syn_kwargs:
-                _try_set_on_any(
-                    ("GradedChemicalSynapse", "IonotropicSynapse"),
-                    ("GradedChemicalSynapse_k_minus", "IonotropicSynapse_k_minus", "k_minus"),
-                    jp.syn_kwargs["k_minus"],
-                )
+                # Optional kinetics if provided (ms)
+                if "tau_rise_ms" in jp.syn_kwargs:
+                    _try_set_on_any(
+                        syn_views,
+                        (
+                            "DifferentiableExpTwoSynapse_tau_rise_ms",
+                            "GradedChemicalSynapse_tau_rise_ms",
+                            "IonotropicSynapse_tau_rise_ms",
+                            "tau_rise_ms",
+                            "tauRise_ms",
+                        ),
+                        jp.syn_kwargs["tau_rise_ms"],
+                    )
+                if "tau_decay_ms" in jp.syn_kwargs:
+                    _try_set_on_any(
+                        syn_views,
+                        (
+                            "DifferentiableExpTwoSynapse_tau_decay_ms",
+                            "GradedChemicalSynapse_tau_decay_ms",
+                            "IonotropicSynapse_tau_decay_ms",
+                            "tau_decay_ms",
+                            "tauDecay_ms",
+                        ),
+                        jp.syn_kwargs["tau_decay_ms"],
+                    )
+                # Graded params if present
+                if "v_th" in jp.syn_kwargs:
+                    _try_set_on_any(
+                        syn_views,
+                        ("DifferentiableExpTwoSynapse_v_th", "GradedChemicalSynapse_v_th", "IonotropicSynapse_v_th", "v_th"),
+                        jp.syn_kwargs["v_th"],
+                    )
+                if "delta" in jp.syn_kwargs:
+                    _try_set_on_any(
+                        syn_views,
+                        ("DifferentiableExpTwoSynapse_delta", "GradedChemicalSynapse_delta", "IonotropicSynapse_delta", "delta"),
+                        jp.syn_kwargs["delta"],
+                    )
+                if "k_minus" in jp.syn_kwargs:
+                    _try_set_on_any(
+                        ("GradedChemicalSynapse", "IonotropicSynapse"),
+                        ("GradedChemicalSynapse_k_minus", "IonotropicSynapse_k_minus", "k_minus"),
+                        jp.syn_kwargs["k_minus"],
+                    )
         else:  # gap
             for name in ("GapJunction_gGap", "gGap"):
                 try:
@@ -1344,6 +1365,81 @@ def build_jaxley_from_params(spec: NetworkSpec, bundle: JaxleyParamBundle) -> Bu
 
     # print("[check] src root:", src_xyz, "dst root:", dst_xyz)
     # Locations
+
+    # Final safety pass: clamp synaptic parameters to avoid NaNs in integrate/grad
+    def _sanitize_synapses(_net: jx.Network):
+        import math as _math
+        # Ionotropic-like synapses
+        if hasattr(_net, "IonotropicSynapse"):
+            view = _net.IonotropicSynapse
+            for eid in list(_net.edges.index):
+                try:
+                    # k_minus must be > 0
+                    try:
+                        km = float(view.edge(eid).get("IonotropicSynapse_k_minus"))
+                        if (not _math.isfinite(km)) or km < 1e-6:
+                            view.edge(eid).set("IonotropicSynapse_k_minus", 1e-6)
+                    except Exception:
+                        pass
+                    # delta must be > 0
+                    try:
+                        de = float(view.edge(eid).get("IonotropicSynapse_delta"))
+                        if (not _math.isfinite(de)) or de <= 0.0:
+                            view.edge(eid).set("IonotropicSynapse_delta", 1.0)
+                    except Exception:
+                        pass
+                    # gS non-negative
+                    try:
+                        gs = float(view.edge(eid).get("IonotropicSynapse_gS"))
+                        if (not _math.isfinite(gs)) or gs < 0.0:
+                            view.edge(eid).set("IonotropicSynapse_gS", 1e-4)
+                    except Exception:
+                        pass
+                    # e_syn finite
+                    try:
+                        es = float(view.edge(eid).get("IonotropicSynapse_e_syn"))
+                        if not _math.isfinite(es):
+                            view.edge(eid).set("IonotropicSynapse_e_syn", 0.0)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+        # DifferentiableExpTwoSynapse
+        if hasattr(_net, "DifferentiableExpTwoSynapse"):
+            view = _net.DifferentiableExpTwoSynapse
+            for eid in list(_net.edges.index):
+                try:
+                    for key, fallback in (
+                        ("DifferentiableExpTwoSynapse_tau_rise_ms", 2.0),
+                        ("DifferentiableExpTwoSynapse_tau_decay_ms", 10.0),
+                        ("DifferentiableExpTwoSynapse_delta", 10.0),
+                        ("DifferentiableExpTwoSynapse_gS", 1e-4),
+                        ("DifferentiableExpTwoSynapse_e_syn", 0.0),
+                    ):
+                        try:
+                            val = float(view.edge(eid).get(key))
+                            if not _math.isfinite(val):
+                                view.edge(eid).set(key, fallback)
+                        except Exception:
+                            pass
+                    # enforce positivity
+                    try:
+                        tr = float(view.edge(eid).get("DifferentiableExpTwoSynapse_tau_rise_ms"))
+                        if tr <= 0:
+                            view.edge(eid).set("DifferentiableExpTwoSynapse_tau_rise_ms", 1.0)
+                    except Exception:
+                        pass
+                    try:
+                        td = float(view.edge(eid).get("DifferentiableExpTwoSynapse_tau_decay_ms"))
+                        if td <= 0:
+                            view.edge(eid).set("DifferentiableExpTwoSynapse_tau_decay_ms", 5.0)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+
+    _sanitize_synapses(net)
+
     return BuiltJaxley(net=net, id_to_index=id_to_index, edge_id_to_index=edge_id_to_index)
 
 
@@ -1406,10 +1502,7 @@ def attach_currents_via_datastim(net: jx.Network, id_to_index: Dict[str, int], c
         if idx is None:
             continue
         try:
-            # print(net.cell(idx))
-            # print(len(curr[curr!=0.0]))
-            # print(curr[curr!=0.0][0])
-            print(np.unique(curr))
+            # Debug prints removed to avoid slowdowns
             data_stimuli = net.cell(idx).branch(0).comp(0).data_stimulate(curr, data_stimuli)
         except Exception:
             print(idx)
@@ -1435,7 +1528,7 @@ def load_c302_preset_to_intermediate(preset: str) -> NetworkSpec:
 
     # Ensure target directory exists (tests may run in clean tree)
     import os as _os
-    _target_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "examples")
+    _target_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "\c302\c302examples")
     try:
         _os.makedirs(_target_dir, exist_ok=True)
     except Exception:
@@ -1525,7 +1618,7 @@ if __name__ == "__main__":
     parser.add_argument("--plot_n", type=int, default=20)
     args = parser.parse_args()
 
-    # # Step 1: NeuroML → intermediate
+    # Step 1: NeuroML → intermediate
     inter = load_c302_preset_to_intermediate(args.preset)
 
     base_meta = meta_policy_from_bioparams(inter.meta)

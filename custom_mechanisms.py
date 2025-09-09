@@ -62,6 +62,8 @@ class VGCaChannel(Channel):
         f_tau = jnp.maximum(1e-6, params[f"{prefix}_f_tau"])
         new_e = solve_inf_gate_exponential(states[f"{prefix}_e"], dt, e_inf, e_tau)
         new_f = solve_inf_gate_exponential(states[f"{prefix}_f"], dt, f_inf, f_tau)
+        new_e = jnp.clip(new_e, 0.0, 1.0)
+        new_f = jnp.clip(new_f, 0.0, 1.0)
         return {f"{prefix}_e": new_e, f"{prefix}_f": new_f, "eCa": states.get("eCa", 120.0)}
 
     def init_state(self, states: Dict[str, jnp.ndarray], v: float, params: Dict[str, jnp.ndarray], delta_t: float) -> Dict[str, jnp.ndarray]:
@@ -76,7 +78,8 @@ class VGCaChannel(Channel):
         f = states[f"{prefix}_f"]
         g = params[f"{prefix}_gCa"]
         eCa = states.get("eCa", params.get(f"{prefix}_E_Ca_mV", 120.0))
-        return g * (e ** 2) * f * (v - eCa)
+        current = g * (e ** 2) * f * (v - eCa)
+        return jnp.nan_to_num(current, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class GradedChemicalSynapse(Synapse):
@@ -159,13 +162,15 @@ class GapJunctionSynapse(Synapse):
 
     def compute_current(self, states: Dict, pre_voltage: float, post_voltage: float, params: Dict) -> float:
         prefix = self._name
-        # Accept multiple key variants: custom, built-in, or bare "gGap"
-        g = (
-            params.get(f"{prefix}_gGap")
-            or params.get("GapJunctionSynapse_gGap")
-            or params.get("GapJunction_gGap")
-            or params.get("gGap")
-        )
+        # Accept multiple key variants: custom, built-in, or bare "gGap" without
+        # using Python's `or` on arrays (which raises ambiguous truth-value errors).
+        g = params.get(f"{prefix}_gGap")
+        if g is None:
+            g = params.get("GapJunctionSynapse_gGap")
+        if g is None:
+            g = params.get("GapJunction_gGap")
+        if g is None:
+            g = params.get("gGap")
         # Current into postsynaptic compartment (Ohmic coupling)
         return g * (pre_voltage - post_voltage)
 
@@ -233,6 +238,7 @@ class DifferentiableExpTwoSynapse(Synapse):
         gS = params.get(f"{prefix}_gS", params.get("IonotropicSynapse_gS"))
         e_syn = params.get(f"{prefix}_e_syn", params.get("IonotropicSynapse_e_syn"))
         g_syn = gS * states[f"{prefix}_s"]
-        return g_syn * (post_voltage - e_syn)
+        current = g_syn * (post_voltage - e_syn)
+        return jnp.nan_to_num(current, nan=0.0, posinf=0.0, neginf=0.0)
 
 

@@ -25,25 +25,24 @@ Parameters and setting used to generate this network:
         BioParameter: chem_inh_syn_decay = 10ms (SRC: BlindGuess, certainty 0.1)
         BioParameter: chem_inh_syn_erev = -80mV (SRC: BlindGuess, certainty 0.1)
         BioParameter: chem_inh_syn_rise = 3ms (SRC: BlindGuess, certainty 0.1)
-        BioParameter: elec_syn_decay = 10ms (SRC: BlindGuess, certainty 0.1)
-        BioParameter: elec_syn_erev = 0mV (SRC: BlindGuess, certainty 0.1)
-        BioParameter: elec_syn_rise = 3ms (SRC: BlindGuess, certainty 0.1)
         BioParameter: muscle_iaf_C = 3pF (SRC: BlindGuess, certainty 0.1)
         BioParameter: muscle_iaf_conductance = 0.1nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: muscle_iaf_leak_reversal = -50mV (SRC: BlindGuess, certainty 0.1)
         BioParameter: muscle_iaf_reset = -50mV (SRC: BlindGuess, certainty 0.1)
+        BioParameter: muscle_iaf_tau1 = 50ms (SRC: BlindGuess, certainty 0.1)
         BioParameter: muscle_iaf_thresh = -30mV (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_iaf_C = 3pF (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_iaf_conductance = 0.1nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_iaf_leak_reversal = -50mV (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_iaf_reset = -50mV (SRC: BlindGuess, certainty 0.1)
+        BioParameter: neuron_iaf_tau1 = 50ms (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_iaf_thresh = -30mV (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_to_muscle_chem_exc_syn_gbase = 0.01nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_to_muscle_chem_inh_syn_gbase = 0.01nS (SRC: BlindGuess, certainty 0.1)
-        BioParameter: neuron_to_muscle_elec_syn_gbase = 0nS (SRC: BlindGuess, certainty 0.1)
+        BioParameter: neuron_to_muscle_elec_syn_gbase = 0.01 nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_to_neuron_chem_exc_syn_gbase = 0.01nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: neuron_to_neuron_chem_inh_syn_gbase = 0.01nS (SRC: BlindGuess, certainty 0.1)
-        BioParameter: neuron_to_neuron_elec_syn_gbase = 0nS (SRC: BlindGuess, certainty 0.1)
+        BioParameter: neuron_to_neuron_elec_syn_gbase = 0.01 nS (SRC: BlindGuess, certainty 0.1)
         BioParameter: unphysiological_offset_current = 0pA (SRC: KnownError, certainty 0)
         BioParameter: unphysiological_offset_current_del = 0ms (SRC: KnownError, certainty 0)
         BioParameter: unphysiological_offset_current_dur = 200ms (SRC: KnownError, certainty 0)
@@ -51,7 +50,7 @@ Parameters and setting used to generate this network:
    
     -->
 
-    <Target component="sim_c302_A_IClamp" />
+    <Target component="sim_c302_B_IClamp" />
 
     <!-- Include core NeuroML2 ComponentType definitions -->
 
@@ -59,33 +58,55 @@ Parameters and setting used to generate this network:
     <Include file="Networks.xml" />
     <Include file="Simulation.xml" />
     
-    <Include file="c302_A_IClamp.net.nml" />
+    <Include file="cell_B.xml" />
+    
+    <Include file="c302_B_IClamp.net.nml" />
 
     <!-- End of NeuroML2 content -->
     
 
-    <Simulation id="sim_c302_A_IClamp" length="6000ms" step="0.05ms" target="c302_A_IClamp">
+    <Simulation id="sim_c302_B_IClamp" length="6000ms" step="0.05ms" target="c302_B_IClamp">
 
-        <Display id="neurons" title="c302_A_IClamp: Membrane potential of a number of neurons" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-52" ymax="-28">
+        <Display id="neurons" title="c302_B_IClamp: Membrane potential of a number of neurons" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-52" ymax="-28">
             
             <Line id="ADAL" quantity="ADAL/0/generic_neuron_iaf_cell/v" scale="1mV" color="#e13b00" timeScale="1ms" />
-            <Line id="PVCL" quantity="PVCL/0/generic_neuron_iaf_cell/v" scale="1mV" color="#2e112a" timeScale="1ms" />
+            <Line id="PVCL" quantity="PVCL/0/generic_neuron_iaf_cell/v" scale="1mV" color="#32b579" timeScale="1ms" />
             
         </Display>
       
-        <Display id="muscles" title="c302_A_IClamp: Membrane potential of a number of muscles" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-52" ymax="-28">
+        <Display id="muscles" title="c302_B_IClamp: Membrane potential of a number of muscles" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-52" ymax="-28">
             
-            <Line id="MDR01" quantity="MDR01/0/generic_muscle_iaf_cell/v" scale="1mV" color="#32b579" timeScale="1ms" />
+            <Line id="MDR01" quantity="MDR01/0/generic_muscle_iaf_cell/v" scale="1mV" color="#b1f7ed" timeScale="1ms" />
+
+        </Display>
+      
+        <Display id="activity_neurons" title="c302_B_IClamp: Activity of a number of neurons" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-0.1" ymax="1.1">
+            
+            <Line id="ADAL" quantity="ADAL/0/generic_neuron_iaf_cell/activity" scale="1" color="#2e112a" timeScale="1ms" />
+            <Line id="PVCL" quantity="PVCL/0/generic_neuron_iaf_cell/activity" scale="1" color="#000000" timeScale="1ms" />
+
+        </Display>
+      
+        <Display id="activity_muscles" title="c302_B_IClamp: Activity of a number of muscles" timeScale="1ms" xmin="-600.0" xmax="6600.000000000001" ymin="-0.1" ymax="1.1">
+            
+            <Line id="MDR01" quantity="MDR01/0/generic_muscle_iaf_cell/activity" scale="1" color="#4c2e5d" timeScale="1ms" />
 
         </Display>
 
-        <OutputFile id="neurons_v" fileName="c302_A_IClamp.dat">
+        <OutputFile id="neurons_v" fileName="c302_B_IClamp.dat">
             <OutputColumn id="ADAL_v" quantity="ADAL/0/generic_neuron_iaf_cell/v"/>
             <OutputColumn id="PVCL_v" quantity="PVCL/0/generic_neuron_iaf_cell/v"/>
         </OutputFile>
         
-        <OutputFile id="muscles_v" fileName="c302_A_IClamp.muscles.dat">
+        <OutputFile id="neurons_activity" fileName="c302_B_IClamp.activity.dat">
+            <OutputColumn id="ADAL_v" quantity="ADAL/0/generic_neuron_iaf_cell/activity"/>
+            <OutputColumn id="PVCL_v" quantity="PVCL/0/generic_neuron_iaf_cell/activity"/>
+        </OutputFile>
+        <OutputFile id="muscles_v" fileName="c302_B_IClamp.muscles.dat">
             <OutputColumn id="MDR01_v" quantity="MDR01/0/generic_muscle_iaf_cell/v"/>
+        </OutputFile>
+        <OutputFile id="muscles_activity" fileName="c302_B_IClamp.muscles.activity.dat">
+            <OutputColumn id="MDR01_v" quantity="MDR01/0/generic_muscle_iaf_cell/activity"/>
         </OutputFile>
     </Simulation>
 
